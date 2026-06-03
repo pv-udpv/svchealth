@@ -1,5 +1,10 @@
 # svchealth — Service Health Board
 
+[![CI](https://github.com/pv-udpv/svchealth/actions/workflows/ci.yml/badge.svg)](https://github.com/pv-udpv/svchealth/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/pv-udpv/svchealth.svg)](https://pkg.go.dev/github.com/pv-udpv/svchealth)
+[![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 A terminal Service Health Board built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lipgloss](https://github.com/charmbracelet/lipgloss). Runs automated health checks against a configured list of API endpoints, discovers specs by URI (OpenAPI / Swagger / JSON Schema), classifies status with color-coded indicators (🟢/🟡/🔴), tracks short-term uptime history, and shows local + remote host metrics — all in a compact, resize-responsive view for quick infrastructure diagnostics.
 
 ## Features
@@ -171,6 +176,10 @@ eng := checks.NewEngine(ctx, cfg, hooks)
 Alerts are debounced with hysteresis: a notifier fires only after `alert_after` consecutive DOWN checks and a recovery fires only after `alert_clear_after` consecutive healthy checks.
 
 To add your own integration, implement the interface in `internal/connectors` and assign it in `buildHooks()`.
+
+## License
+
+Released under the [MIT License](./LICENSE).
 
 ## Notes
 
