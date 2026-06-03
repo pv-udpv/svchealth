@@ -1,6 +1,7 @@
 # svchealth — Service Health Board
 
 [![CI](https://github.com/pv-udpv/svchealth/actions/workflows/ci.yml/badge.svg)](https://github.com/pv-udpv/svchealth/actions/workflows/ci.yml)
+[![Release](https://github.com/pv-udpv/svchealth/actions/workflows/release.yml/badge.svg)](https://github.com/pv-udpv/svchealth/actions/workflows/release.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/pv-udpv/svchealth.svg)](https://pkg.go.dev/github.com/pv-udpv/svchealth)
 [![Go 1.22+](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
@@ -52,6 +53,32 @@ Requires Go 1.22+ (pure-Go SQLite driver, no cgo; built/tested on Go 1.25). The 
 go run ./cmd/smoketest   # exercises config, discovery, checks, store, metrics
 go run ./cmd/viewtest    # renders the TUI View() at two widths
 ```
+
+### Make targets
+
+```bash
+make            # build the binary into bin/
+make check      # gofmt-check + vet + test (the local quality gate)
+make test       # go test ./...
+make cover      # coverage profile + summary
+make run        # build & run with config.toml
+make help       # list all targets
+```
+
+### Tests
+
+Pure logic is unit-tested with the standard `testing` package (`go test ./...`):
+status classification + thresholds, config defaults/validation, the SQLite store
+(uptime, percentiles, window aggregates, latency history, prune), the sparkline /
+latency-graph renderers, and the HTTP exporter (`/metrics` + `/snapshot`). CI runs
+the suite and reports coverage on every push and pull request.
+
+### Releases
+
+Tagging `vX.Y.Z` triggers a [GoReleaser](https://goreleaser.com) workflow that
+cross-compiles binaries for linux / macOS / windows (amd64 + arm64), stamps the
+version via `-ldflags`, and attaches archives + checksums to the GitHub release.
+Check the running binary's version with `svchealth -version`.
 
 ## Keybindings
 

@@ -21,9 +21,18 @@ import (
 	"github.com/pv-udpv/svchealth/internal/ui"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	cfgPath := flag.String("config", "config.toml", "path to TOML config file")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("svchealth", version)
+		return
+	}
 
 	if err := run(*cfgPath); err != nil {
 		fmt.Fprintln(os.Stderr, "svchealth:", err)
