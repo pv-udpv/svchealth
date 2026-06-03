@@ -1,0 +1,59 @@
+# Service Health Board configuration
+# Edit endpoints below and restart. No code changes required.
+
+[settings]
+interval_seconds   = 30      # default polling cadence per endpoint
+timeout_seconds    = 8       # default per-request timeout
+history_size       = 60      # samples kept per endpoint (sparkline length)
+db_path            = "svchealth.db"
+degraded_latency_ms = 1500   # healthy 2xx slower than this is shown YELLOW
+critical_latency_ms = 5000   # healthy 2xx slower than this is shown RED (0 = off)
+alert_after        = 3       # consecutive DOWN checks before a notifier fires
+alert_clear_after  = 1       # consecutive healthy checks before recovery fires
+metrics_listen     = ""      # e.g. "127.0.0.1:9899" enables HTTP /metrics + /snapshot
+show_local_metrics = true    # show local host load avg + disk usage bar
+
+# --- Direct URL endpoints ----------------------------------------------------
+
+[[endpoint]]
+name          = "github-api"
+url           = "https://api.github.com"
+expect_status = 200
+interval_seconds = 60
+degraded_latency_ms = 800    # per-endpoint override (0 = inherit global)
+critical_latency_ms = 3000   # per-endpoint override (0 = inherit global)
+
+[[endpoint]]
+name = "cloudflare-trace"
+url  = "https://www.cloudflare.com/cdn-cgi/trace"
+
+[[endpoint]]
+name = "httpbin-200"
+url  = "https://httpbin.org/status/200"
+
+[[endpoint]]
+name = "httpbin-slow"        # demonstrates YELLOW (degraded) classification
+url  = "https://httpbin.org/delay/2"
+
+[[endpoint]]
+name = "httpbin-500"         # demonstrates RED (down) classification
+url  = "https://httpbin.org/status/500"
+
+# --- Spec-derived endpoint ---------------------------------------------------
+# When `url` is omitted and `spec_uri` is set, the tool fetches the OpenAPI /
+# JSON Schema document, discovers paths, and derives a health-check target
+# (health/ready paths are preferred automatically).
+
+[[endpoint]]
+name     = "petstore-spec"
+spec_uri = "https://petstore3.swagger.io/api/v3/openapi.json"
+
+# --- Endpoint with auth headers + remote metrics -----------------------------
+# Uncomment and adapt for protected services that also expose host metrics.
+#
+# [[endpoint]]
+# name         = "internal-svc"
+# url          = "https://svc.example.ts.net/healthz"
+# metrics_path = "https://svc.example.ts.net/metrics"  # JSON: {"load1":..,"disk_used_pct":..}
+# [endpoint.headers]
+# Authorization = "Bearer <token>"
