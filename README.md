@@ -37,6 +37,10 @@ A terminal Service Health Board built with [Bubble Tea](https://github.com/charm
   - `/metrics` — Prometheus text exposition (`svchealth_up`, `svchealth_status`, `svchealth_latency_ms`, `svchealth_http_status`, `svchealth_uptime_ratio`, all labeled by `endpoint`).
   - `/snapshot` — current per-endpoint state as indented JSON.
   - `/healthz` — liveness probe for the exporter itself.
+- **Config hot-reload** — the running TUI watches `config.toml` and applies changes live (add/remove/edit endpoints) without restarting; invalid edits are reported in the footer and ignored.
+- **Grouped + multi-column layout** — tag endpoints with an optional `group` to render them under group headers; when the list grows long and the terminal is wide enough, the TUI switches to a dense two-column view.
+- **Uptime-threshold alerts** — set `uptime_alert_threshold` (e.g. `90`) and `uptime_alert_window` to fire an alert when an endpoint's rolling uptime drops below the threshold. Delivered by the **Webhook** notifier (Slack/Discord/generic incoming webhook); uses its own latch with hysteresis so it fires once per crossing.
+- **History export (CLI)** — `svchealth export` dumps persisted samples from SQLite to JSON or CSV for external analysis.
 
 ## Build & run
 
@@ -80,6 +84,17 @@ cross-compiles binaries for linux / macOS / windows (amd64 + arm64), stamps the
 version via `-ldflags`, and attaches archives + checksums to the GitHub release.
 Check the running binary's version with `svchealth -version`.
 
+### History export
+
+```bash
+svchealth export --format json              # all samples to stdout
+svchealth export --format csv --out out.csv # CSV to a file
+svchealth export --endpoint api --since 24h # one endpoint, last 24h
+svchealth export --db path/to.db            # override the store path
+```
+
+`--since` accepts Go durations (`1h`, `24h`, `30m`); omit it to export everything. JSON is emitted as `{generated_at, count, samples:[...]}`; CSV has a header row.
+
 ## Keybindings
 
 | Key            | Action                          |
@@ -115,6 +130,8 @@ Every integration below is enabled only when its variables are set; otherwise th
 | `SVCHEALTH_CLERK_ENDPOINTS` | Comma list of endpoint names to auth (empty = all) |
 | `SVCHEALTH_TELEGRAM_BOT_TOKEN` | Telegram Bot API token (from @BotFather) |
 | `SVCHEALTH_TELEGRAM_CHAT_ID` | Target chat id for DOWN/RECOVERED messages |
+| `SVCHEALTH_WEBHOOK_URL` | Incoming webhook URL (Slack/Discord/generic) for down + uptime alerts |
+| `SVCHEALTH_WEBHOOK_STYLE` | Webhook payload style: `slack` (default), `discord`, or `generic` |
 | `SVCHEALTH_METRICS_LISTEN` | Listen addr for the HTTP exporter (e.g. `127.0.0.1:9899`); overrides `metrics_listen` |
 
 The Supabase table can be created with:
@@ -151,10 +168,13 @@ alert_after         = 3       # consecutive DOWN checks before a notifier fires
 alert_clear_after   = 1       # consecutive healthy checks before recovery fires
 metrics_listen      = ""      # e.g. "127.0.0.1:9899" to enable /metrics + /snapshot
 show_local_metrics  = true
+# uptime_alert_threshold = 90  # fire when rolling uptime < 90% (0 = off)
+# uptime_alert_window    = "1h"  # rolling window (default 1h)
 
 [[endpoint]]
 name          = "github-api"
 url           = "https://api.github.com"
+group         = "external"    # optional group tag for grouped rendering
 expect_status = 200           # 0 = any 2xx
 interval_seconds = 60         # per-endpoint override
 degraded_latency_ms = 800     # per-endpoint threshold (0 = inherit global)
@@ -179,11 +199,11 @@ cmd/svchealth        entrypoint: load config -> open store -> build engine -> ru
 internal/config      TOML loader + validation + defaults
 internal/specs       OpenAPI/Swagger/JSON-Schema discovery -> derived targets
 internal/checks      Checker (single check + classify) + Engine (orchestration, streak/hooks, auth)
-internal/store       SQLite history + stats (percentiles) + colored sparkline + Supabase mirror
+internal/store       SQLite history + stats (percentiles) + colored sparkline + Supabase mirror + export
 internal/metrics     local load/disk (procfs + statfs) + remote JSON metrics
-internal/connectors  Notifier / EdgeStatus / AuthProvider interfaces + Linear/Cloudflare/Clerk/Telegram impls + MultiNotifier
+internal/connectors  Notifier / EdgeStatus / AuthProvider / UptimeAlerter interfaces + Linear/Cloudflare/Clerk/Telegram/Webhook + MultiNotifier
 internal/exporter    HTTP /metrics (Prometheus) + /snapshot (JSON) + /healthz, reading from the store
-internal/ui          Bubble Tea model: responsive table, detail pane, latency graph + 1h/24h aggregates, sort/filter/search, color
+internal/ui          Bubble Tea model: responsive/grouped/multi-column table, detail pane, latency graph + aggregates, config hot-reload, sort/filter/search
 ```
 
 ### Connectors
@@ -199,8 +219,9 @@ eng := checks.NewEngine(ctx, cfg, hooks)
 - **Cloudflare** — `TunnelHealthy(host)` queries `GET /zones/{id}` and `GET /accounts/{id}/cfd_tunnel`, caches for ~30s, and is shown in the detail pane.
 - **Clerk** — `Authorize(endpoint)` mints a token via `POST /v1/sessions/{id}/tokens` and returns an `Authorization: Bearer` header, scoped by `SVCHEALTH_CLERK_ENDPOINTS` when set.
 - **Telegram** — `OnSustainedDown` / `OnRecovered` POST a Markdown message to `https://api.telegram.org/bot<token>/sendMessage`. When more than one notifier is configured, a `MultiNotifier` fans each event to all of them.
+- **Webhook** — `OnSustainedDown` / `OnRecovered` / `OnUptimeAlert` / `OnUptimeRecovered` POST JSON to an incoming webhook URL. Payload shape follows `SVCHEALTH_WEBHOOK_STYLE` (`slack`, `discord`, or `generic`). Doubles as the uptime-threshold alerter.
 
-Alerts are debounced with hysteresis: a notifier fires only after `alert_after` consecutive DOWN checks and a recovery fires only after `alert_clear_after` consecutive healthy checks.
+Alerts are debounced with hysteresis: a notifier fires only after `alert_after` consecutive DOWN checks and a recovery fires only after `alert_clear_after` consecutive healthy checks. Uptime alerts use a separate latch and fire once per crossing of `uptime_alert_threshold`.
 
 To add your own integration, implement the interface in `internal/connectors` and assign it in `buildHooks()`.
 

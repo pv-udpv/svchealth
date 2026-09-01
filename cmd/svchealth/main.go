@@ -25,6 +25,16 @@ import (
 var version = "dev"
 
 func main() {
+	// Subcommand: `svchealth export ...` (headless history export) is handled
+	// before flag parsing of the TUI's own options.
+	if len(os.Args) > 1 && os.Args[1] == "export" {
+		if err := runExport(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "svchealth export:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	cfgPath := flag.String("config", "config.toml", "path to TOML config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -68,6 +78,8 @@ func run(cfgPath string) error {
 	}
 
 	eng := checks.NewEngine(ctx, cfg, hooks)
+	// Uptime-threshold alerting (0 disables); uses the SQLite store as the source.
+	eng.SetUptime(st, cfg.Settings.UptimeAlertThreshold, cfg.Settings.UptimeWindow())
 
 	// Optional HTTP exporter (/metrics + /snapshot). Enabled by config or the
 	// SVCHEALTH_METRICS_LISTEN env var (env takes precedence).
@@ -83,6 +95,8 @@ func run(cfgPath string) error {
 	}
 
 	model := ui.New(ctx, eng, st, supa, cfg)
+	// Optional live reload: watch config.toml for changes.
+	model = model.WithReload(cfgPath)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err = p.Run()
 	// Best-effort final flush of any buffered Supabase rows.
@@ -121,6 +135,14 @@ func buildHooks() (connectors.Hooks, error) {
 		return hooks, err
 	} else if tg != nil {
 		notifiers = append(notifiers, tg)
+	}
+	// Webhook doubles as a sustained-down notifier and (optionally) the uptime
+	// threshold alerter, so it is wired into both hooks.
+	if wh, err := connectors.NewWebhookFromEnv(); err != nil {
+		return hooks, err
+	} else if wh != nil {
+		notifiers = append(notifiers, wh)
+		hooks.Uptime = wh
 	}
 	switch len(notifiers) {
 	case 0:

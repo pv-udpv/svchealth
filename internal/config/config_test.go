@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeTmp(t *testing.T, body string) string {
@@ -128,5 +129,41 @@ name = "x"
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := Load("/nonexistent/path/config.toml"); err == nil {
 		t.Error("expected error for missing file, got nil")
+	}
+}
+
+func TestUptimeWindowParsing(t *testing.T) {
+	s := Settings{UptimeAlertWindow: "24h"}
+	if d := s.UptimeWindow(); d != 24*time.Hour {
+		t.Errorf("UptimeWindow() = %v, want 24h", d)
+	}
+	if d := (Settings{}).UptimeWindow(); d != time.Hour {
+		t.Errorf("default UptimeWindow() = %v, want 1h", d)
+	}
+	if d := (Settings{UptimeAlertWindow: "garbage"}).UptimeWindow(); d != time.Hour {
+		t.Errorf("invalid window should fall back to 1h, got %v", d)
+	}
+}
+
+func TestGroupFieldParses(t *testing.T) {
+	p := writeTmp(t, `
+[[endpoint]]
+name  = "core-api"
+url   = "https://a.example"
+group = "core"
+
+[[endpoint]]
+name = "edge"
+url  = "https://b.example"
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Endpoints[0].Group != "core" {
+		t.Errorf("group = %q, want core", c.Endpoints[0].Group)
+	}
+	if c.Endpoints[1].Group != "" {
+		t.Errorf("ungrouped endpoint group = %q, want empty", c.Endpoints[1].Group)
 	}
 }

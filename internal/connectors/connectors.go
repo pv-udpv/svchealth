@@ -5,6 +5,7 @@ package connectors
 
 import (
 	"context"
+	"time"
 )
 
 // CheckSummary is a connector-facing view of a check result, kept independent
@@ -15,6 +16,16 @@ type CheckSummary struct {
 	HTTPStatus int
 	LatencyMs  int64
 	Err        string
+}
+
+// UptimeAlerter is invoked when rolling uptime crosses a configured threshold.
+// It is optional and orthogonal to Notifier; a connector may implement both.
+type UptimeAlerter interface {
+	// OnUptimeAlert fires when an endpoint's rolling uptime falls below the
+	// threshold over the configured window. uptimePct is 0..100.
+	OnUptimeAlert(ctx context.Context, endpoint string, uptimePct float64, window time.Duration, samples int) error
+	// OnUptimeRecovered fires when uptime climbs back above the threshold.
+	OnUptimeRecovered(ctx context.Context, endpoint string, uptimePct float64) error
 }
 
 // Notifier is invoked when an endpoint transitions to a sustained RED state.
@@ -47,6 +58,7 @@ type Hooks struct {
 	Notifier Notifier
 	Edge     EdgeStatus
 	Auth     AuthProvider
+	Uptime   UptimeAlerter // optional uptime-threshold alerter
 }
 
 // --- No-op default implementations (used until real connectors are wired) ---

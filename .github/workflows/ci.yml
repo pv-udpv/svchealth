@@ -42,7 +42,7 @@ jobs:
       - name: Coverage
         run: |
           go test -coverprofile=cover.out \
-            ./internal/checks ./internal/config ./internal/store ./internal/exporter
+            ./internal/checks ./internal/config ./internal/connectors ./internal/store ./internal/exporter
           go tool cover -func=cover.out | tail -1
 
       - name: Build

@@ -44,6 +44,23 @@ type Settings struct {
 	// exporter serving /metrics (Prometheus) and /snapshot (JSON). Can also be
 	// set via the SVCHEALTH_METRICS_LISTEN env var, which takes precedence.
 	MetricsListen string `toml:"metrics_listen"`
+	// UptimeAlertThreshold fires an uptime alert when rolling uptime falls below
+	// this percentage (0..100). 0 disables uptime alerting. Requires an uptime
+	// alerter (e.g. Webhook) to be configured.
+	UptimeAlertThreshold float64 `toml:"uptime_alert_threshold"`
+	// UptimeAlertWindow is the rolling window (e.g. "1h", "24h") over which
+	// uptime is computed for threshold alerting. Empty defaults to 1h.
+	UptimeAlertWindow string `toml:"uptime_alert_window"`
+}
+
+// UptimeWindow resolves the uptime-alert window duration, defaulting to 1h.
+func (s Settings) UptimeWindow() time.Duration {
+	if s.UptimeAlertWindow != "" {
+		if d, err := time.ParseDuration(s.UptimeAlertWindow); err == nil && d > 0 {
+			return d
+		}
+	}
+	return time.Hour
 }
 
 // Endpoint is a single monitored target.
@@ -75,6 +92,10 @@ type Endpoint struct {
 	// CriticalLatencyMs overrides the global critical (RED) latency threshold for
 	// this endpoint. 0 means "inherit global".
 	CriticalLatencyMs int `toml:"critical_latency_ms"`
+	// Group optionally tags the endpoint for grouped rendering in the TUI. Empty
+	// means "ungrouped". Endpoints sharing a group are rendered together under a
+	// group header.
+	Group string `toml:"group"`
 }
 
 // Defaults applied when a value is omitted.

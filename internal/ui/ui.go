@@ -5,6 +5,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -28,12 +29,13 @@ var (
 	accent = lipgloss.Color("69")
 	fg     = lipgloss.Color("252")
 
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(accent).Padding(0, 1)
-	headerStyle = lipgloss.NewStyle().Foreground(dim)
-	footerStyle = lipgloss.NewStyle().Foreground(dim)
-	selStyle    = lipgloss.NewStyle().Background(lipgloss.Color("236"))
-	colHdrStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("250")).Underline(true)
-	metricStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(accent).Padding(0, 1)
+	headerStyle    = lipgloss.NewStyle().Foreground(dim)
+	footerStyle    = lipgloss.NewStyle().Foreground(dim)
+	selStyle       = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	colHdrStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("250")).Underline(true)
+	metricStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	groupHeaderSty = lipgloss.NewStyle().Bold(true).Foreground(accent)
 )
 
 func statusColor(s checks.Status) lipgloss.Color {
@@ -53,6 +55,7 @@ func statusColor(s checks.Status) lipgloss.Color {
 
 type tickMsg struct{ name string }
 type resultMsg struct{ res checks.Result }
+type reloadTickMsg struct{}
 
 // InjectResult wraps a check result as a Model message. Exposed for test/
 // preview harnesses that drive the model without a live event loop.
@@ -68,6 +71,7 @@ type supaFlushMsg struct{}
 type row struct {
 	name      string
 	url       string
+	group     string
 	last      checks.Result
 	uptime    float64
 	samples   int
@@ -109,6 +113,10 @@ type Model struct {
 	lastErr       string
 	quitting      bool
 
+	// config hot-reload
+	cfgPath string    // watched config path ("" disables reload)
+	cfgMod  time.Time // last-observed config mod time
+
 	// view state
 	sort             sortMode
 	filter           filterMode
@@ -126,21 +134,47 @@ type Model struct {
 
 // New builds the initial model. supa may be nil to disable Supabase mirroring.
 func New(ctx context.Context, eng *checks.Engine, st *store.Store, supa *store.Supabase, cfg *config.Config) Model {
-	order := eng.Endpoints()
-	rows := make([]row, len(order))
-	for i, n := range order {
-		rows[i] = row{name: n, url: eng.TargetURL(n)}
-	}
-	return Model{
+	m := Model{
 		ctx:          ctx,
 		engine:       eng,
 		store:        st,
 		supa:         supa,
 		cfg:          cfg,
-		rows:         rows,
-		order:        order,
 		uptimeWindow: time.Hour,
 	}
+	m.rebuildRows()
+	return m
+}
+
+// WithReload enables config hot-reload, watching cfgPath for changes. An empty
+// path keeps reload disabled. Returns the updated model value.
+func (m Model) WithReload(cfgPath string) Model {
+	m.cfgPath = cfgPath
+	if fi, err := os.Stat(cfgPath); err == nil {
+		m.cfgMod = fi.ModTime()
+	}
+	return m
+}
+
+// groupOf returns the configured group tag for an endpoint name ("" if none).
+func (m Model) groupOf(name string) string {
+	for _, ep := range m.cfg.Endpoints {
+		if ep.Name == name {
+			return ep.Group
+		}
+	}
+	return ""
+}
+
+// rebuildRows rebuilds the row table and order from the engine's current
+// configuration (used at startup and after a config reload).
+func (m *Model) rebuildRows() {
+	m.order = m.engine.Endpoints()
+	m.rows = make([]row, len(m.order))
+	for i, n := range m.order {
+		m.rows[i] = row{name: n, url: m.engine.TargetURL(n), group: m.groupOf(n)}
+	}
+	m.cursor = 0
 }
 
 // Init kicks off the first check for every endpoint plus the metrics+prune loops.
@@ -148,6 +182,9 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.metricsCmd(), m.pruneCmd()}
 	if m.supa != nil {
 		cmds = append(cmds, m.supaFlushCmd())
+	}
+	if m.cfgPath != "" {
+		cmds = append(cmds, m.reloadCmd())
 	}
 	for _, n := range m.order {
 		cmds = append(cmds, m.checkCmd(n))    // immediate first check
@@ -168,6 +205,52 @@ func (m Model) checkCmd(name string) tea.Cmd {
 		m.supa.Enqueue(m.ctx, res) // no-op if supa is nil
 		return resultMsg{res: res}
 	}
+}
+
+// reloadCmd polls the watched config file for changes.
+func (m Model) reloadCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return reloadTickMsg{} })
+}
+
+// maybeReload re-loads the config when the watched file's mod time advances.
+// On a valid reload it rebuilds the engine + rows and returns the commands to
+// re-arm checks (and schedule new endpoints).
+func (m Model) maybeReload() (Model, []tea.Cmd) {
+	if m.cfgPath == "" {
+		return m, nil
+	}
+	fi, err := os.Stat(m.cfgPath)
+	if err != nil || !fi.ModTime().After(m.cfgMod) {
+		return m, nil
+	}
+	m.cfgMod = fi.ModTime()
+
+	newCfg, err := config.Load(m.cfgPath)
+	if err != nil {
+		m.lastErr = "config reload failed: " + err.Error()
+		return m, nil
+	}
+
+	old := map[string]bool{}
+	for _, r := range m.rows {
+		old[r.name] = true
+	}
+
+	m.cfg = newCfg
+	m.engine.Reload(m.ctx, newCfg)
+	m.engine.SetUptime(m.store, newCfg.Settings.UptimeAlertThreshold, newCfg.Settings.UptimeWindow())
+	m.rebuildRows()
+	m.detail = false
+	m.lastErr = ""
+
+	var cmds []tea.Cmd
+	for _, n := range m.order {
+		cmds = append(cmds, m.checkCmd(n)) // re-check all to reflect edits
+		if !old[n] {
+			cmds = append(cmds, m.scheduleCmd(n)) // arm cadence for new endpoints
+		}
+	}
+	return m, cmds
 }
 
 // supaFlushCmd periodically flushes the Supabase buffer.
@@ -203,8 +286,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
-		// scheduled re-check, then reschedule
+		// scheduled re-check, then reschedule. Skip endpoints removed by a
+		// config reload (their checker is gone).
+		if !m.engine.Has(msg.name) {
+			return m, nil
+		}
 		return m, tea.Batch(m.checkCmd(msg.name), m.scheduleCmd(msg.name))
+
+	case reloadTickMsg:
+		m2, cmds := m.maybeReload()
+		return m2, tea.Batch(append([]tea.Cmd{m2.reloadCmd()}, cmds...)...)
 
 	case resultMsg:
 		cmd := m.applyResult(msg.res)
@@ -636,64 +727,159 @@ func (m Model) summaryLine() string {
 	return strings.Join([]string{gs, ys, rs}, "  ")
 }
 
-// renderTable builds the responsive endpoint table sized to the terminal.
+// renderTable builds the responsive endpoint table sized to the terminal,
+// choosing among three layouts:
+//
+//	grouped  - group headers interleaved with rows (default sort only)
+//	columns  - two vertical columns for long lists on a wide terminal
+//	single   - the default compact table with uptime + sparkline history
 func (m Model) renderTable() string {
-	// Column widths adapt to terminal width.
-	nameW := clamp(m.width/4, 10, 28)
-	statusW := 10
-	latW := 7
-	upW := 8
-	sparkW := m.sparkWidth()
-
-	var b strings.Builder
-
-	// Header row
-	hdr := fmt.Sprintf("%-2s %-*s %-*s %*s %*s  %s",
-		"", nameW, "ENDPOINT", statusW, "STATUS", latW, "LAT", upW, "UPTIME", "HISTORY")
-	b.WriteString(colHdrStyle.Render(truncate(hdr, m.width)))
-	b.WriteString("\n")
-
 	vis := m.visible()
 	if len(vis) == 0 {
-		b.WriteString(headerStyle.Render("  (no endpoints match current filter/search)"))
-		b.WriteString("\n")
-		return b.String()
+		return headerStyle.Render("  (no endpoints match current filter/search)")
 	}
 
+	hasGroups := false
+	for _, ri := range vis {
+		if m.rows[ri].group != "" {
+			hasGroups = true
+			break
+		}
+	}
+
+	if hasGroups && m.sort == sortConfig {
+		return m.renderGrouped(vis)
+	}
+	if len(vis) >= 16 && m.width >= 100 {
+		return m.renderColumns(vis)
+	}
+	return m.renderSingle(vis)
+}
+
+// renderSingle is the default single-column table with history sparkline.
+func (m Model) renderSingle(vis []int) string {
+	nameW := clamp(m.width/4, 10, 28)
+	statusW, latW, upW, sparkW := 10, 7, 8, m.sparkWidth()
+
+	var b strings.Builder
+	hdr := fmt.Sprintf("%-2s %-*s %-*s %*s %*s  %s",
+		"", nameW, "ENDPOINT", statusW, "STATUS", latW, "LAT", upW, "UPTIME", "HISTORY")
+	b.WriteString(colHdrStyle.Render(truncate(hdr, m.width)) + "\n")
+
 	for vi, ri := range vis {
-		row := m.rows[ri]
-		sym := lipgloss.NewStyle().Foreground(statusColor(row.last.Status)).Render(row.last.Status.Symbol())
-		statusTxt := lipgloss.NewStyle().Foreground(statusColor(row.last.Status)).Render(
-			fmt.Sprintf("%-*s", statusW, row.last.Status.String()))
-
-		lat := "-"
-		if row.last.Latency > 0 {
-			lat = fmt.Sprintf("%dms", row.last.Latency.Milliseconds())
-		}
-		up := "-"
-		if row.samples > 0 {
-			up = fmt.Sprintf("%.1f%%", row.uptime*100)
-		}
-		name := truncate(row.name, nameW)
-
-		spark := m.colorSpark(row.spark, row.sparkStat, sparkW)
-
-		line := fmt.Sprintf("%s %-*s %s %*s %*s  %s",
-			sym, nameW, name, statusTxt, latW, lat, upW, up, spark)
-
-		// remote metrics appended if present
-		if row.remote.OK && (row.remote.Load1 > 0 || row.remote.DiskUsedPct > 0) {
-			line += metricStyle.Render(fmt.Sprintf("  [l%.2f d%.0f%%]", row.remote.Load1, row.remote.DiskUsedPct))
-		}
-
-		line = truncate(line, m.width)
+		line := truncate(m.rowLine(ri, nameW, statusW, latW, upW, sparkW), m.width)
 		if vi == m.cursor {
 			line = selStyle.Width(m.width).Render(line)
 		}
-		b.WriteString(line)
-		b.WriteString("\n")
+		b.WriteString(line + "\n")
 	}
 	return b.String()
+}
+
+// renderGrouped renders rows in config order with a header at each group
+// transition.
+func (m Model) renderGrouped(vis []int) string {
+	nameW := clamp(m.width/4, 10, 28)
+	statusW, latW, upW, sparkW := 10, 7, 8, m.sparkWidth()
+
+	var b strings.Builder
+	hdr := fmt.Sprintf("%-2s %-*s %-*s %*s %*s  %s",
+		"", nameW, "ENDPOINT", statusW, "STATUS", latW, "LAT", upW, "UPTIME", "HISTORY")
+	b.WriteString(colHdrStyle.Render(truncate(hdr, m.width)) + "\n")
+
+	prev := "\x00" // sentinel distinct from any real group (incl. "")
+	for vi, ri := range vis {
+		g := m.rows[ri].group
+		if g != prev {
+			prev = g
+			if g != "" {
+				b.WriteString(groupHeaderSty.Render("▸ "+truncate(g, m.width-2)) + "\n")
+			}
+		}
+		line := truncate(m.rowLine(ri, nameW, statusW, latW, upW, sparkW), m.width)
+		if vi == m.cursor {
+			line = selStyle.Width(m.width).Render(line)
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+// renderColumns lays out the visible list as two vertical columns (left = first
+// half, right = second half) with compact cells, for long lists on wide
+// terminals. It omits the sparkline to keep cells dense.
+func (m Model) renderColumns(vis []int) string {
+	mid := (len(vis) + 1) / 2
+	halfW := m.width/2 - 2
+
+	var b strings.Builder
+	b.WriteString(colHdrStyle.Render(fmt.Sprintf("%-*s  %-*s", halfW, "ENDPOINT", halfW, "ENDPOINT")) + "\n")
+	for i := 0; i < mid; i++ {
+		left := m.rowCell(vis[i], halfW)
+		if i == m.cursor {
+			left = selStyle.Width(halfW).Render(left)
+		} else {
+			left = padRight(left, halfW)
+		}
+
+		right := ""
+		if i+mid < len(vis) {
+			right = m.rowCell(vis[i+mid], halfW)
+			if i+mid == m.cursor {
+				right = selStyle.Width(halfW).Render(right)
+			}
+		}
+		b.WriteString(left + "  " + right + "\n")
+	}
+	return b.String()
+}
+
+// rowLine renders one full-width row (name, status, latency, uptime, sparkline).
+func (m Model) rowLine(ri, nameW, statusW, latW, upW, sparkW int) string {
+	row := m.rows[ri]
+	sym := lipgloss.NewStyle().Foreground(statusColor(row.last.Status)).Render(row.last.Status.Symbol())
+	statusTxt := lipgloss.NewStyle().Foreground(statusColor(row.last.Status)).Render(
+		fmt.Sprintf("%-*s", statusW, row.last.Status.String()))
+
+	lat := "-"
+	if row.last.Latency > 0 {
+		lat = fmt.Sprintf("%dms", row.last.Latency.Milliseconds())
+	}
+	up := "-"
+	if row.samples > 0 {
+		up = fmt.Sprintf("%.1f%%", row.uptime*100)
+	}
+	name := truncate(row.name, nameW)
+	spark := m.colorSpark(row.spark, row.sparkStat, sparkW)
+
+	line := fmt.Sprintf("%s %-*s %s %*s %*s  %s",
+		sym, nameW, name, statusTxt, latW, lat, upW, up, spark)
+	if row.remote.OK && (row.remote.Load1 > 0 || row.remote.DiskUsedPct > 0) {
+		line += metricStyle.Render(fmt.Sprintf("  [l%.2f d%.0f%%]", row.remote.Load1, row.remote.DiskUsedPct))
+	}
+	return line
+}
+
+// rowCell renders a compact cell (symbol, name, status, latency) for the
+// multi-column layout.
+func (m Model) rowCell(ri, w int) string {
+	row := m.rows[ri]
+	sym := lipgloss.NewStyle().Foreground(statusColor(row.last.Status)).Render(row.last.Status.Symbol())
+	statusTxt := lipgloss.NewStyle().Foreground(statusColor(row.last.Status)).Render(row.last.Status.String())
+	lat := "-"
+	if row.last.Latency > 0 {
+		lat = fmt.Sprintf("%dms", row.last.Latency.Milliseconds())
+	}
+	nameMax := clamp(w-22, 4, 28)
+	return fmt.Sprintf("%s %s %s %s", sym, truncate(row.name, nameMax), statusTxt, lat)
+}
+
+// padRight pads a (possibly styled) string to a minimum visual width.
+func padRight(s string, w int) string {
+	if n := lipgloss.Width(s); n < w {
+		return s + strings.Repeat(" ", w-n)
+	}
+	return s
 }
 
 // colorSpark applies per-cell color to the sparkline string.
