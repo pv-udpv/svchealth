@@ -3,7 +3,7 @@ PKG       := ./cmd/svchealth
 BIN_DIR   := bin
 COVER_OUT := cover.out
 # Packages that have tests (avoids covdata on no-test packages).
-TEST_PKGS := ./internal/checks ./internal/config ./internal/connectors ./internal/store ./internal/exporter
+TEST_PKGS := ./internal/checks ./internal/config ./internal/connectors ./internal/store ./internal/exporter ./internal/ui ./cmd/svchealth
 
 VERSION   := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS   := -s -w -X main.version=$(VERSION)

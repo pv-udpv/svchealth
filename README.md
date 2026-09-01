@@ -71,11 +71,18 @@ make help       # list all targets
 
 ### Tests
 
-Pure logic is unit-tested with the standard `testing` package (`go test ./...`):
-status classification + thresholds, config defaults/validation, the SQLite store
-(uptime, percentiles, window aggregates, latency history, prune), the sparkline /
-latency-graph renderers, and the HTTP exporter (`/metrics` + `/snapshot`). CI runs
-the suite and reports coverage on every push and pull request.
+Unit-tested with the standard `testing` package (`go test ./...`):
+
+- **checks** — status classification + thresholds, connection/HTTP error paths;
+  engine reload (add/remove endpoints) and uptime-alert firing/hysteresis.
+- **config** — defaults, per-endpoint overrides, validation, uptime-window parsing, groups.
+- **store** — SQLite insert/recent/uptime/latest/prune, percentiles, window aggregates, latency history, sparkline / latency-graph renderers, and history export.
+- **connectors** — webhook payload shapes (slack/discord/generic) and non-2xx handling.
+- **exporter** — `/metrics` (Prometheus) and `/snapshot` (JSON) via `httptest`.
+- **ui** — layout selection (single/grouped/two-column), grouping headers, filter/search/sort, compact cells, clamping/truncation/padding, and config hot-reload (`maybeReload` applies edits, ignores invalid config).
+- **cmd/svchealth** — export JSON/CSV formatters and db-path resolution.
+
+CI runs the suite and reports coverage on every push and pull request.
 
 ### Releases
 
